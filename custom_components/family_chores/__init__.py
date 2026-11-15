@@ -35,11 +35,11 @@ async def async_setup_entry(hass, entry):
         frontend_url_path='family-chores',
         sidebar_title='Faccende',
         sidebar_icon='mdi:broom',
-        module_url='/family_chores_assets/family-chores-panel.js?v=6',
+        module_url='/family_chores_assets/family-chores-panel.js?v=061',
         require_admin=False,
     )
     # Automatically load the two custom Lovelace cards on every dashboard.
-    add_extra_js_url(hass, '/family_chores_assets/family-chores-cards.js?v=6')
+    add_extra_js_url(hass, '/family_chores_assets/family-chores-cards.js?v=061')
 
     store=await hass.async_add_executor_job(Store,hass.config.path('.storage/family_chores.sqlite'))
     hass.data[DOMAIN]=store

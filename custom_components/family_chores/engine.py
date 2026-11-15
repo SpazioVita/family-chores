@@ -153,11 +153,16 @@ class Store:
         ORDER BY ordinal,id''',(day,))
 
     def plan(self,today,horizon=30):
-        """Idempotent planning. Protect existing assignments; avoid same-day duplicates if possible.
-        Each chore keeps its own rotation cursor. Uncovered assignments are explicit.
+        """Plan occurrences while preserving rotation across replanning.
+
+        The stable ordering uses every known user's ordinal (including suspended
+        users) so a changing eligibility list cannot reset the rotation.
+        Existing assignments, including today's, are never rewritten here.
         """
         finish=today+timedelta(days=horizon)
         with self.db:
+            roster=self.rows('SELECT id,ordinal FROM users ORDER BY ordinal,id')
+            positions={u['id']:i for i,u in enumerate(roster)}
             for c in self.rows('SELECT * FROM chores WHERE active=1 ORDER BY id'):
                 start=date.fromisoformat(c['start_date'])
                 d=max(today,start)
@@ -165,18 +170,44 @@ class Store:
                 if delta % c['frequency']:
                     d+=timedelta(days=c['frequency']-delta%c['frequency'])
                 cursor=c['cursor']
+                # Seed from the last retained occurrence before the planning window.
+                previous=self.one('''SELECT user_id FROM assignments
+                    WHERE chore_id=? AND due_date<?
+                    ORDER BY due_date DESC,id DESC LIMIT 1''',
+                    (c['id'],d.isoformat()))
+                last_user=previous['user_id'] if previous else None
                 while d<=finish:
                     stamp=d.isoformat()
-                    exists=self.one('SELECT id FROM assignments WHERE chore_id=? AND due_date=?',(c['id'],stamp))
-                    if not exists:
+                    existing=self.one('''SELECT id,user_id FROM assignments
+                        WHERE chore_id=? AND due_date=?''',(c['id'],stamp))
+                    if existing:
+                        # E.g. today's retained assignment after refresh_future().
+                        if existing['user_id'] is not None:
+                            last_user=existing['user_id']
+                    else:
                         users=self.eligible(stamp)
                         selected=None
                         if users:
-                            # Rotate over eligible users, prefer one with no duty that day.
-                            ordered=users[cursor%len(users):]+users[:cursor%len(users)]
-                            occupied={x['user_id'] for x in self.rows('SELECT user_id FROM assignments WHERE due_date=? AND user_id IS NOT NULL',(stamp,))}
-                            selected=next((u for u in ordered if u['id'] not in occupied),ordered[0])
+                            if last_user in positions:
+                                last_position=positions[last_user]
+                                ordered=sorted(users,key=lambda u:
+                                    (positions[u['id']]-last_position-1)%len(roster))
+                            else:
+                                # New chore / an assignee who has since been deleted.
+                                ordered=users[cursor%len(users):]+users[:cursor%len(users)]
+                            occupied={x['user_id'] for x in self.rows('''
+                                SELECT user_id FROM assignments
+                                WHERE due_date=? AND user_id IS NOT NULL
+                                  AND status NOT IN ('cancelled','missed')''',(stamp,))}
+                            # Avoid a consecutive repeat first, and avoid same-day
+                            # collisions where possible; a sole eligible user may repeat.
+                            selected=(next((u for u in ordered if u['id']!=last_user
+                                            and u['id'] not in occupied),None)
+                                      or next((u for u in ordered if u['id']!=last_user),None)
+                                      or next((u for u in ordered if u['id'] not in occupied),None)
+                                      or ordered[0])
                             cursor=(users.index(selected)+1)%len(users)
+                            last_user=selected['id']
                         new=self.db.execute('''INSERT INTO assignments(chore_id,user_id,due_date,status,chore_name,user_name,original_chore_id,original_user_id,original_ha_user_id) VALUES(?,?,?,?,?,?,?,?,?)''',(c['id'],selected['id'] if selected else None,stamp,'pending' if d==today else 'scheduled',c['name'],selected['name'] if selected else None,c['id'],selected['id'] if selected else None,selected['ha_user_id'] if selected else None))
                         self._event(new.lastrowid,'assigned',detail='uncovered' if not selected else None)
                     d+=timedelta(days=c['frequency'])
@@ -219,7 +250,7 @@ class Store:
                 self._event(a['id'],'replanned',detail=f"assignment={a['id']};chore={a['chore_id']};previous_user={a['user_id']};date={a['due_date']}")
             self.db.execute("DELETE FROM alerts WHERE assignment_id IN (SELECT id FROM assignments WHERE due_date>? AND status='scheduled')",(today.isoformat(),))
             self.db.execute("DELETE FROM assignments WHERE due_date>? AND status='scheduled'",(today.isoformat(),))
-            self.db.execute('UPDATE chores SET cursor=0')
+            # Preserve the cursor; plan() derives continuity from retained assignments.
         self.plan(today)
 
     def board_snapshot(self, today):
