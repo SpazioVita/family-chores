@@ -1,0 +1,14 @@
+{
+  "title": "Family Chores",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Installa Family Chores",
+        "description": "Crea il gestionale delle faccende domestiche con un database vuoto. Le card e il pannello laterale saranno caricati automaticamente."
+      }
+    },
+    "abort": {
+      "already_configured": "Family Chores è già installato."
+    }
+  }
+}
